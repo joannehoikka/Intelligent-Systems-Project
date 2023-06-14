@@ -1,0 +1,240 @@
+#include <LiquidCrystal.h> // kirjasto LCD:lle
+#include <TimerOne.h>
+#include <Ethernet.h> // Ethernet kirjasto W5100
+#include <PubSubClient.h>
+
+EthernetClient ethClient; // Ethernet object var
+static uint8_t mymac[6] = { 0x44,0x76,0x58,0x10,0x00,0x62 };
+
+// MGTT settings
+unsigned int Port = 1883; // MQTT portin numero
+byte server[] = { 10,6,0,21 }; // TAMK IP
+char* deviceId = ":)"; // laitteen id
+char* clientId = "moiccu"; // random merkkijono, jotta oma viesti erottuu
+char* deviceSecret = "tamk";
+
+// MQTT Server asetukset
+void callback(char* topic, byte* payload, unsigned int length);
+// subscription callback saaduille MQTT viesteille
+PubSubClient client(server, Port, callback, ethClient); // mqtt client
+
+// MQTT topic names
+#define inTopic "ICT1B_in_2020" // * MQTT kanava, jossa data otetaan vastaan
+#define outTopic "ICT4_out_2020" // * MQTT kanava, jossa data lähetetään
+
+const int rs = 8, en = 7, d4 = 6, d5 = 5, d6 = 4, d7 = 3;
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+// Tuulen nopeuden muuttujat
+volatile double frq=0;
+volatile int puls=0;
+const int pulse_counting_pin= 2;
+volatile int i_time=0;
+volatile double value = 0;
+volatile double voltage = 0;
+
+//Tuulen suunnan muuttujat
+unsigned int frequency = 0;
+unsigned long startTime = 0;
+unsigned long endTime = 0;
+int WD = 0;
+int angle = 0;
+
+#define PIN_A0 14
+#define PIN_A1 15
+#define PIN_A2 16
+#define PIN_A3 17
+
+void Timer_int_routine(){
+ i_time++;
+
+ if(i_time>5){
+   i_time=0;
+   frq=(-0.24 + (puls/3) * 0.699);
+   puls=0;
+   }
+}
+
+void pulse_interrupt(void){
+ puls++;
+}
+
+void setup() {
+ lcd.begin(20, 4);
+ pinMode(PIN_A0, INPUT_PULLUP);
+ pinMode(PIN_A1, INPUT_PULLUP);
+ pinMode(PIN_A2, INPUT_PULLUP);
+ pinMode(PIN_A3, INPUT_PULLUP);
+ 
+ Serial.begin(9600);
+ Serial.println("Start 19.3.2021");
+ delay(500);
+ fetch_IP(); // muodosta Ethernet yhteys
+ Connect_MQTT_server(); // yhdistää MQTT serverille
+ 
+ pinMode(pulse_counting_pin, INPUT); // asetetaan digital pin inputiksi
+ lcd.begin(20, 4);
+ attachInterrupt(digitalPinToInterrupt(pulse_counting_pin), pulse_interrupt, RISING);
+ Timer1.initialize(500000); // 0.5 sekuntia
+ Timer1.attachInterrupt(Timer_int_routine);
+}
+
+void loop() { // käyttöliittymä
+
+ lcd.clear();
+ lcd.print("Press 1 for");
+ lcd.setCursor(0, 1);
+ lcd.print("Wind Speed");
+ lcd.setCursor(0, 2);
+ lcd.print("Press 2 for");
+ lcd.setCursor(0, 3);
+ lcd.print("Wind Direction");
+ while (digitalRead(PIN_A0) == HIGH && digitalRead(PIN_A1) == HIGH) {
+ // odottaa napin '1' tai '2' painallusta
+ }
+ 
+ send_MQTT_message(frq, angle); //Lähetetään MQTT-viesti
+ //Kun käyttäjä painaa 1 - ohjelma tulostaa näytölle tuulen nopeuden
+ 
+ if (digitalRead(PIN_A0) == LOW) {
+ lcd.clear();
+ lcd.print("Wind Speed: ");
+ lcd.setCursor(0, 1);
+ lcd.print(frq);
+ lcd.print(" m/s");
+ lcd.setCursor(0,4);
+ lcd.print("Press 3 to return"); //Painamalla 3, käyttäjä pääsee takaisin menuun
+ 
+ while (digitalRead(PIN_A2) == HIGH) {
+// odottaa napin '3' painallusta. Eli näytöllä näkyy tuulen nopeus kunnes painetaan 3.
+ }
+}
+
+ //Kun käyttäjä painaa 2 - ohjelma tulostaa näytölle tuulen suunnan
+ if (digitalRead(PIN_A1) == LOW) {
+ lcd.clear();
+ lcd.print("Wind Direction: ");
+ lcd.setCursor(0, 1);
+ value = analogRead(A4);
+ voltage = (value * 5)/1024; // muutetaan pinnin lukema volteiksi
+ int angle = int((voltage - 1.2) / 0.43 * 45 + 0.5) % 360; // muunnetaan voltit asteiksi
+
+//If-else -rakenne, jonka avulla asetetaan muuttujalle WD arvo
+ if (angle < 45 && angle >= 0) {
+ WD = 0;
+ }
+ else if (angle < 90 && angle >= 45) {
+ WD = 45;
+ }
+ else if (angle < 135 && angle >= 90) {
+ WD = 90;
+ }
+ else if (angle < 180 && angle >= 135) {
+ WD = 135;
+ }
+ else if (angle < 225 && angle >= 185) {
+ WD = 180;
+ }
+ else if (angle < 270 && angle >= 225) {
+ WD = 225;
+ }
+ else if (angle < 315 && angle >= 270) {
+ WD = 270;
+ }
+ else if (angle < 359 && angle >= 315) {
+ WD = 315;
+ }
+ else if (angle == 360) {
+ WD = 0;
+ }
+ 
+ // Switch-case -rakenne joka määrittää mitä näytölle tulostuu
+ switch (WD) {
+ case 0: lcd.print("N"); break;
+ case 45: lcd.print("NE"); break;
+ case 90: lcd.print("E"); break;
+ case 135: lcd.print("SE"); break;
+ case 180: lcd.print("S"); break;
+ case 225: lcd.print("SW"); break;
+ case 270: lcd.print("W"); break;
+ case 315: lcd.print("NW"); break;
+ default: lcd.print("?"); break;
+ }
+ 
+ delay(300);
+ lcd.setCursor(0,4);
+ lcd.print("Press 3 to return"); //Painamalla 3, käyttäjä pääsee takaisin menuun
+ while (digitalRead(PIN_A2) == HIGH) {
+ // odottaa napin '3' painallusta. Eli näytöllä näkyy tuulen suunta kunnes painetaan 3.
+ }
+ }
+ 
+ while (digitalRead(PIN_A0) == LOW || digitalRead(PIN_A1) == LOW) {
+ // odotetaan ettei nappeja '1' tai '2' paineta
+ }
+}
+
+// haetaan IP osoite DHCP serveriltä
+void fetch_IP(void){
+ byte rev=1;
+ rev=Ethernet.begin(mymac); // haetaan IP osoite
+ Serial.print( F("\nW5100 Revision ") );
+  if (rev == 0){
+ Serial.println( F( "Failed to access Ethernet controller" ) );
+ }
+
+ Serial.println( F( "Setting up DHCP" ));
+ Serial.print("Connected with IP: ");
+ Serial.println(Ethernet.localIP());
+ delay(1500);
+}
+
+// MQTT viestin lähetys
+void send_MQTT_message(int num1, int num2){
+ char bufa[100]; // Print message to serial monitor
+ if (client.connected()){
+ sprintf(bufa,"IOTJS={\"S_name1\":\"moicccu_windSpeed\",\"S_value1\":%d,\"S_name2\":\"moicccu_windDirection\",\"S_value2\":%d}",num1, num2);
+// luodaan viesti joka sisältää headerin ja datan
+ Serial.println( bufa );
+ client.publish(outTopic,bufa);
+// lähetetään viesti MQTT serverille
+ }
+ else{ //jos yhteys katkeaa:
+ delay(500);
+ Serial.println("No, re-connecting");
+ client.connect(clientId, deviceId, deviceSecret);
+ delay(1000); // odotetaan yhteyden palautumista
+}
+}
+
+// MQTT serveri-yhteys
+void Connect_MQTT_server(){
+ Serial.println(" Connecting to MQTT" );
+ Serial.print(server[0]); Serial.print("."); // tulostaa MQTT serverin IP osoitteen Serial monitorille
+ Serial.print(server[1]); Serial.print(".");
+ Serial.print(server[2]); Serial.print(".");
+ Serial.println(server[3]);
+ delay(500);
+
+ if (!client.connected()){ // tarkistetaan onko yhteyttä
+ if (client.connect(clientId, deviceId, deviceSecret)){
+// yhteys MQTT serverille
+ Serial.println(" Connected OK " );
+ client.subscribe(inTopic); // tilataan sisältö
+ }
+ else{
+ Serial.println(client.state());
+ }
+ }
+}
+
+//Receive incoming MQTT message
+void callback(char* topic, byte* payload, unsigned int length){
+ char* receiv_string; // kopioidaan kuorman sisältö char*:iin
+ receiv_string = (char*) malloc(length + 1);
+ memcpy(receiv_string, payload, length);
+// kopioi vastaanotettu viesti receiv_string:lle
+ receiv_string[length] = '\0';
+ Serial.println( receiv_string );
+ free(receiv_string);
+}
